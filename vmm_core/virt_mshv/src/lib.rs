@@ -166,12 +166,26 @@ impl<'a> MshvProtoPartition<'a> {
             .map_err(|e| ErrorInner::CreateVcpu(e.into()))?;
 
         // Install intercepts required by both architectures.
-        vmfd.install_intercept(mshv_install_intercept {
-            access_type_mask: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
-            intercept_type: hvdef::hypercall::HvInterceptType::HvInterceptTypeHypercall.0,
-            intercept_parameter: Default::default(),
-        })
-        .map_err(|e| ErrorInner::InstallIntercept(e.into()))?;
+        //
+        // The hypercall intercept is not supported by the Microsoft hypervisor
+        // on partitions created with nested-virtualization enabled (the
+        // hypervisor returns HV_STATUS_INVALID_PARAMETER from
+        // ImInstallHypercallIntercept). Skip it in that case; the guest's HV#1
+        // hypercalls will be handled natively by the L0 hypervisor, which is
+        // the appropriate behavior for a nested-virt L1.
+        if !config.nested_virt {
+            vmfd.install_intercept(mshv_install_intercept {
+                access_type_mask: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
+                intercept_type: hvdef::hypercall::HvInterceptType::HvInterceptTypeHypercall.0,
+                intercept_parameter: Default::default(),
+            })
+            .map_err(|e| {
+                ErrorInner::InstallIntercept(
+                    hvdef::hypercall::HvInterceptType::HvInterceptTypeHypercall,
+                    e.into(),
+                )
+            })?;
+        }
 
         vmfd.install_intercept(mshv_install_intercept {
             access_type_mask: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
@@ -179,7 +193,12 @@ impl<'a> MshvProtoPartition<'a> {
                 hvdef::hypercall::HvInterceptType::HvInterceptTypeUnknownSynicConnection.0,
             intercept_parameter: Default::default(),
         })
-        .map_err(|e| ErrorInner::InstallIntercept(e.into()))?;
+        .map_err(|e| {
+            ErrorInner::InstallIntercept(
+                hvdef::hypercall::HvInterceptType::HvInterceptTypeUnknownSynicConnection,
+                e.into(),
+            )
+        })?;
 
         vmfd.install_intercept(mshv_install_intercept {
             access_type_mask: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
@@ -187,7 +206,12 @@ impl<'a> MshvProtoPartition<'a> {
                 hvdef::hypercall::HvInterceptType::HvInterceptTypeRetargetInterruptWithUnknownDeviceId.0,
             intercept_parameter: Default::default(),
         })
-        .map_err(|e| ErrorInner::InstallIntercept(e.into()))?;
+        .map_err(|e| {
+            ErrorInner::InstallIntercept(
+                hvdef::hypercall::HvInterceptType::HvInterceptTypeRetargetInterruptWithUnknownDeviceId,
+                e.into(),
+            )
+        })?;
 
         // Set up a signal for forcing vcpufd.run() to exit with EINTR.
         static SIGNAL_HANDLER_INIT: Once = Once::new();
@@ -785,8 +809,8 @@ enum ErrorInner {
     },
     #[error("failed to reset state")]
     ResetState(#[source] Box<virt::state::StateError<Error>>),
-    #[error("install intercept failed")]
-    InstallIntercept(#[source] KernelError),
+    #[error("failed to install {0:?} intercept")]
+    InstallIntercept(hvdef::hypercall::HvInterceptType, #[source] KernelError),
     #[cfg(guest_arch = "x86_64")]
     #[error("failed to register cpuid override")]
     RegisterCpuid(#[source] KernelError),

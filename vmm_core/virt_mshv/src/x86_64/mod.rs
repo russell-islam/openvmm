@@ -103,8 +103,12 @@ impl virt::Hypervisor for LinuxMshv {
             vm_topology::processor::x86::ApicMode::X2ApicSupported
                 | vm_topology::processor::x86::ApicMode::X2ApicEnabled
         );
-        let create_args =
-            partition_create_args(snp, x2apic, config.processor_topology.smt_enabled(), config.nested_virt);
+        let create_args = partition_create_args(
+            snp,
+            x2apic,
+            config.processor_topology.smt_enabled(),
+            config.nested_virt,
+        );
 
         let vmfd = create_vm_with_retry(&self.mshv, &create_args)?;
 
@@ -360,7 +364,7 @@ impl MshvProtoPartition<'_> {
             xsaves_state_bv_broken: false,
             dr6_tsx_broken: false,
             nxe_forced_on: false,
-            nested_virt: false,
+            nested_virt: self.config.nested_virt,
         })
     }
 
