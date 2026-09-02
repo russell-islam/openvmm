@@ -635,8 +635,8 @@ iced-x86 = { version = "1.17", default-features = false, features = [
 igvm = { git = "https://github.com/microsoft/igvm", rev = "7184dce1086956342c1bf561f82ff268d06d2c73" }
 igvm_defs = { git = "https://github.com/microsoft/igvm", rev = "7184dce1086956342c1bf561f82ff268d06d2c73", default-features = false }
 kvm-bindings = "0.14.0"
-mshv-bindings = "0.6.8"
-mshv-ioctls = "0.6.8"
+mshv-bindings = "0.7.1"
+mshv-ioctls = "0.7.1"
 uefi = "0.35.0"
 vfio-bindings = "0.4.0"
 x86_64 = { version = "0.15.2", default-features = false }

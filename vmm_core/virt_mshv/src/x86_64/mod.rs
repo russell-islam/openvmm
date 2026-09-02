@@ -104,7 +104,7 @@ impl virt::Hypervisor for LinuxMshv {
                 | vm_topology::processor::x86::ApicMode::X2ApicEnabled
         );
         let create_args =
-            partition_create_args(snp, x2apic, config.processor_topology.smt_enabled());
+            partition_create_args(snp, x2apic, config.processor_topology.smt_enabled(), config.nested_virt);
 
         let vmfd = create_vm_with_retry(&self.mshv, &create_args)?;
 
@@ -167,12 +167,17 @@ impl virt::Hypervisor for LinuxMshv {
         Ok(MshvProtoPartition::new(config, vmfd)?
             .with_snp_cpuid_offload_disabled(self.snp_disable_cpuid_offload))
     }
+
+    fn recognizes_nested_virt(&self) -> bool {
+        true
+    }
 }
 
 fn partition_create_args(
     snp: bool,
     x2apic: bool,
     smt: bool,
+    nested: bool,
 ) -> mshv_bindings::mshv_create_partition_v2 {
     let mut pt_flags =
         1 << mshv_bindings::MSHV_PT_BIT_LAPIC | 1 << mshv_bindings::MSHV_PT_BIT_GPA_SUPER_PAGES;
@@ -182,6 +187,11 @@ fn partition_create_args(
     }
     if smt {
         pt_flags |= 1 << mshv_bindings::MSHV_PT_BIT_SMT_ENABLED_GUEST;
+    }
+    // Modify create_args based on user configuration
+    // For now we only handle nested virtualization, but more features can be added here
+    if nested {
+        pt_flags |= 1 << mshv_bindings::MSHV_PT_BIT_NESTED_VIRTUALIZATION;
     }
 
     mshv_bindings::mshv_create_partition_v2 {
@@ -1492,7 +1502,7 @@ mod tests {
 
     #[test]
     fn snp_partition_creation_uses_isolation_flags() {
-        let args = partition_create_args(true, false, false);
+        let args = partition_create_args(true, false, false, false);
         let pt_isolation = args.pt_isolation;
         let pt_num_cpu_fbanks = args.pt_num_cpu_fbanks;
         let pt_cpu_fbanks = args.pt_cpu_fbanks;
@@ -1525,7 +1535,7 @@ mod tests {
 
     #[test]
     fn ordinary_partition_creation_keeps_feature_banks() {
-        let args = partition_create_args(false, false, true);
+        let args = partition_create_args(false, false, true, false);
         let pt_isolation = args.pt_isolation;
         let pt_num_cpu_fbanks = args.pt_num_cpu_fbanks;
 
