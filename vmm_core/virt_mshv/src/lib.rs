@@ -173,6 +173,23 @@ impl<'a> MshvProtoPartition<'a> {
         // ImInstallHypercallIntercept). Skip it in that case; the guest's HV#1
         // hypercalls will be handled natively by the L0 hypervisor, which is
         // the appropriate behavior for a nested-virt L1.
+        //
+        // Consequence for nested-virt: because OpenVMM's VMBus server relies on
+        // intercepting the guest's HvPostMessage / HvSignalEvent hypercalls,
+        // VMBus does not come up in a nested-virt L1 (the guest firmware's
+        // VMBus root driver reports "failed to initiate contact"). Nested-virt
+        // guests must therefore boot from a non-VMBus device such as NVMe over
+        // emulated PCIe (`--nvme file:...,pcie_port=<port>`), which is serviced
+        // directly by OpenVMM without HV#1 hypercalls.
+        // Nested-virt L1 partitions install no intercepts at all, matching
+        // cloud-hypervisor. OpenVMM's hypercall / SynIC-connection /
+        // retarget-interrupt intercepts exist to service its own VMBus server,
+        // which cannot run in a nested-virt L1 (see the nested-virt comment
+        // below). More importantly, trapping the guest's SynIC connections
+        // into OpenVMM interferes with the guest hypervisor (e.g. hvax64)
+        // configuring its own SynIC as it comes up as an L1 root, causing it
+        // to triple-fault during bring-up. Leave all HV#1 facilities to the
+        // L0 hypervisor for nested-virt partitions.
         if !config.nested_virt {
             vmfd.install_intercept(mshv_install_intercept {
                 access_type_mask: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
@@ -185,33 +202,33 @@ impl<'a> MshvProtoPartition<'a> {
                     e.into(),
                 )
             })?;
+
+            vmfd.install_intercept(mshv_install_intercept {
+                access_type_mask: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
+                intercept_type:
+                    hvdef::hypercall::HvInterceptType::HvInterceptTypeUnknownSynicConnection.0,
+                intercept_parameter: Default::default(),
+            })
+            .map_err(|e| {
+                ErrorInner::InstallIntercept(
+                    hvdef::hypercall::HvInterceptType::HvInterceptTypeUnknownSynicConnection,
+                    e.into(),
+                )
+            })?;
+
+            vmfd.install_intercept(mshv_install_intercept {
+                access_type_mask: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
+                intercept_type:
+                    hvdef::hypercall::HvInterceptType::HvInterceptTypeRetargetInterruptWithUnknownDeviceId.0,
+                intercept_parameter: Default::default(),
+            })
+            .map_err(|e| {
+                ErrorInner::InstallIntercept(
+                    hvdef::hypercall::HvInterceptType::HvInterceptTypeRetargetInterruptWithUnknownDeviceId,
+                    e.into(),
+                )
+            })?;
         }
-
-        vmfd.install_intercept(mshv_install_intercept {
-            access_type_mask: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
-            intercept_type:
-                hvdef::hypercall::HvInterceptType::HvInterceptTypeUnknownSynicConnection.0,
-            intercept_parameter: Default::default(),
-        })
-        .map_err(|e| {
-            ErrorInner::InstallIntercept(
-                hvdef::hypercall::HvInterceptType::HvInterceptTypeUnknownSynicConnection,
-                e.into(),
-            )
-        })?;
-
-        vmfd.install_intercept(mshv_install_intercept {
-            access_type_mask: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
-            intercept_type:
-                hvdef::hypercall::HvInterceptType::HvInterceptTypeRetargetInterruptWithUnknownDeviceId.0,
-            intercept_parameter: Default::default(),
-        })
-        .map_err(|e| {
-            ErrorInner::InstallIntercept(
-                hvdef::hypercall::HvInterceptType::HvInterceptTypeRetargetInterruptWithUnknownDeviceId,
-                e.into(),
-            )
-        })?;
 
         // Set up a signal for forcing vcpufd.run() to exit with EINTR.
         static SIGNAL_HANDLER_INIT: Once = Once::new();

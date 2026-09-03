@@ -103,12 +103,27 @@ impl virt::Hypervisor for LinuxMshv {
             vm_topology::processor::x86::ApicMode::X2ApicSupported
                 | vm_topology::processor::x86::ApicMode::X2ApicEnabled
         );
-        let create_args = partition_create_args(
-            snp,
-            x2apic,
-            config.processor_topology.smt_enabled(),
-            config.nested_virt,
-        );
+        let create_args = if config.nested_virt {
+            // For a nested-virt L1 (a Hyper-V root that loads its own
+            // hypervisor, e.g. hvax64 on AMD), derive the disabled processor
+            // feature banks from L0's ACTUAL features rather than OpenVMM's
+            // hardcoded list, matching cloud-hypervisor. A hardcoded list can
+            // advertise a feature L0 cannot virtualize nested (or leave
+            // reserved bits set); the guest hypervisor then faults when it
+            // relies on that feature during its own bring-up, resetting the L1.
+            nested_partition_create_args(
+                &self.mshv,
+                x2apic,
+                config.processor_topology.smt_enabled(),
+            )
+        } else {
+            partition_create_args(
+                snp,
+                x2apic,
+                config.processor_topology.smt_enabled(),
+                config.nested_virt,
+            )
+        };
 
         let vmfd = create_vm_with_retry(&self.mshv, &create_args)?;
 
@@ -119,15 +134,12 @@ impl virt::Hypervisor for LinuxMshv {
             let synthetic_features_mask = if snp {
                 u64::from(snp_synthetic_features())
             } else if config.nested_virt {
-                // For nested-virt L1 guests, delegate the mask construction
-                // to mshv-ioctls' helper. It queries L0 for the assignable
-                // synthetic-features set (via
-                // HV_PARTITION_PROPERTY_ASSIGNABLE_SYNTHETIC_PROC_FEATURES)
-                // and intersects with the CH default, which is exactly what
-                // cloud-hypervisor does. Setting bits outside L0's
-                // assignable set causes L0 to also clamp the derived
-                // management privileges (create_partitions, cpu_management)
-                // that gate `/dev/mshv` inside the guest.
+                // For a nested-virt L1, advertise exactly the synthetic-feature
+                // set L0 reports as assignable (mshv-ioctls' default mask,
+                // matching cloud-hypervisor). Advertising a synthetic
+                // enlightenment L0 will not service for a nested guest causes
+                // the guest hypervisor (hvax64) to fault during bring-up and
+                // triple-fault the L1.
                 self.mshv.make_default_synthetic_features_mask()
             } else {
                 u64::from(
@@ -174,12 +186,17 @@ impl virt::Hypervisor for LinuxMshv {
             }
         }
 
-        // Tell the hypervisor how many VPs are in each socket.
-        vmfd.set_partition_property(
-            HvPartitionPropertyCode::ProcessorsPerSocket.0,
-            config.processor_topology.reserved_vps_per_socket() as u64,
-        )
-        .map_err(|e| ErrorInner::SetPartitionProperty(e.into()))?;
+        // Tell the hypervisor how many VPs are in each socket. Skip this for a
+        // nested-virt L1: cloud-hypervisor sets only SYNTHETIC_PROC_FEATURES on
+        // a nested partition, and setting ProcessorsPerSocket here is the sole
+        // remaining partition property that differs from CH's known-good setup.
+        if !config.nested_virt {
+            vmfd.set_partition_property(
+                HvPartitionPropertyCode::ProcessorsPerSocket.0,
+                config.processor_topology.reserved_vps_per_socket() as u64,
+            )
+            .map_err(|e| ErrorInner::SetPartitionProperty(e.into()))?;
+        }
 
         Ok(MshvProtoPartition::new(config, vmfd)?
             .with_snp_cpuid_offload_disabled(self.snp_disable_cpuid_offload))
@@ -227,6 +244,53 @@ fn partition_create_args(
         ..Default::default()
     }
 }
+
+/// Build create args for a nested-virt (L1 root) partition, matching
+/// cloud-hypervisor.
+///
+/// Unlike [`partition_create_args`], the disabled processor-feature banks are
+/// derived from L0's ACTUAL processor features
+/// (`HV_PARTITION_PROPERTY_PROCESSOR_FEATURES0/1`) via mshv-ioctls'
+/// `make_default_partition_create_arg`, and the reserved feature bits are left
+/// disabled. This keeps the features advertised to the L1 an exact subset of
+/// what L0 can virtualize nested, so the guest hypervisor (e.g. hvax64 on AMD)
+/// does not fault relying on an unsupported feature during its own bring-up.
+fn nested_partition_create_args(
+    mshv: &mshv_ioctls::Mshv,
+    x2apic: bool,
+    smt: bool,
+) -> mshv_bindings::mshv_create_partition_v2 {
+    let mut create_args = mshv.make_default_partition_create_arg(mshv_ioctls::VmType::Normal);
+
+    // Request nested virtualization for the partition.
+    create_args.pt_flags |= 1 << mshv_bindings::MSHV_PT_BIT_NESTED_VIRTUALIZATION;
+
+    if x2apic {
+        create_args.pt_flags |= 1 << mshv_bindings::MSHV_PT_BIT_X2APIC;
+    }
+    if smt {
+        create_args.pt_flags |= 1 << mshv_bindings::MSHV_PT_BIT_SMT_ENABLED_GUEST;
+    }
+
+    // The default banks disable nested_virt_support; clear that disable bit so
+    // the L1 guest can itself expose nested virtualization.
+    // SAFETY: hv_partition_processor_features is a C union whose u64-array view
+    // and bitfield accessors are both valid; we round-trip through as_uint64.
+    unsafe {
+        let mut feats = mshv_bindings::hv_partition_processor_features::default();
+        for i in 0..create_args.pt_num_cpu_fbanks as usize {
+            feats.as_uint64[i] = create_args.pt_cpu_fbanks[i];
+        }
+        feats.__bindgen_anon_1.set_nested_virt_support(0);
+        for i in 0..create_args.pt_num_cpu_fbanks as usize {
+            create_args.pt_cpu_fbanks[i] = feats.as_uint64[i];
+        }
+    }
+
+    create_args
+}
+
+
 
 fn snp_synthetic_features() -> hvdef::HvPartitionSyntheticProcessorFeatures {
     hvdef::HvPartitionSyntheticProcessorFeatures::new()
