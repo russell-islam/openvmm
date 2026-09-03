@@ -889,6 +889,13 @@ fn common_synthetic_features() -> hvdef::HvPartitionSyntheticProcessorFeatures {
         .with_access_intr_ctrl_regs(true)
         .with_access_hypercall_regs(true)
         .with_access_vp_index(true)
+        // access_vp_regs enables HvCallGetVpRegisters / HvCallSetVpRegisters
+        // for the guest. cloud-hypervisor sets this unconditionally in
+        // `make_default_synthetic_features_mask`, and it is required for
+        // nested-virt L1 guests to be recognized as parent partitions by
+        // the mshv Linux driver (which gates /dev/mshv on the
+        // create_partitions privilege that L0 mshv derives from this bit).
+        .with_access_vp_regs(true)
         .with_fast_hypercall_output(true)
         .with_direct_synthetic_timers(true)
         .with_extended_processor_masks(true)
