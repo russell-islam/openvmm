@@ -116,19 +116,32 @@ impl virt::Hypervisor for LinuxMshv {
         // guest interface is configured. SNP partitions require the smaller
         // early-property feature set accepted by the hypervisor.
         if config.hv_config.is_some() || snp {
-            let synthetic_features = if snp {
-                snp_synthetic_features()
+            let synthetic_features_mask = if snp {
+                u64::from(snp_synthetic_features())
+            } else if config.nested_virt {
+                // For nested-virt L1 guests, delegate the mask construction
+                // to mshv-ioctls' helper. It queries L0 for the assignable
+                // synthetic-features set (via
+                // HV_PARTITION_PROPERTY_ASSIGNABLE_SYNTHETIC_PROC_FEATURES)
+                // and intersects with the CH default, which is exactly what
+                // cloud-hypervisor does. Setting bits outside L0's
+                // assignable set causes L0 to also clamp the derived
+                // management privileges (create_partitions, cpu_management)
+                // that gate `/dev/mshv` inside the guest.
+                self.mshv.make_default_synthetic_features_mask()
             } else {
-                common_synthetic_features()
-                    .with_access_partition_reference_tsc(true)
-                    .with_access_guest_idle_reg(true)
-                    .with_access_frequency_regs(true)
-                    .with_enable_extended_gva_ranges_for_flush_virtual_address_list(true)
+                u64::from(
+                    common_synthetic_features()
+                        .with_access_partition_reference_tsc(true)
+                        .with_access_guest_idle_reg(true)
+                        .with_access_frequency_regs(true)
+                        .with_enable_extended_gva_ranges_for_flush_virtual_address_list(true),
+                )
             };
 
             vmfd.set_partition_property(
                 HvPartitionPropertyCode::SyntheticProcFeatures.0,
-                u64::from(synthetic_features),
+                synthetic_features_mask,
             )
             .map_err(|e| ErrorInner::SetPartitionProperty(e.into()))?;
         }
